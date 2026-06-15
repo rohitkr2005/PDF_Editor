@@ -311,17 +311,68 @@ input:focus,select:focus{border-color:var(--accent)}
 <!-- ════ SPLIT ═══════════════════════════════════════════ -->
 <div id="panel-split" class="panel">
   <h2>✂️ Split PDF</h2>
-  <p style="color:var(--muted)">Extract a page range as separate PDF files, delivered in a ZIP.</p>
+  <p style="color:var(--muted)">Split by page range <em>or</em> pick exact custom pages — your choice.</p>
+
   <div class="dropzone" onclick="document.getElementById('split-file').click()">
-    <div class="dz-icon">📄</div><strong>Upload PDF</strong>
-    <input type="file" id="split-file" accept=".pdf"/>
+    <div class="dz-icon">📄</div>
+    <strong>Click to upload your PDF</strong>
+    <p id="split-file-name" style="margin-top:6px;color:var(--accent)"></p>
+    <input type="file" id="split-file" accept=".pdf" onchange="onSplitFileChange()"/>
   </div>
-  <div style="display:flex;gap:14px">
-    <div class="field" style="flex:1"><label>Start Page</label>
-      <input type="number" id="split-start" value="1" min="1"/></div>
-    <div class="field" style="flex:1"><label>End Page (0 = all)</label>
-      <input type="number" id="split-end" value="0" min="0"/></div>
+
+  <!-- Mode tabs -->
+  <div style="display:flex;gap:0;border:1px solid var(--border);border-radius:8px;overflow:hidden">
+    <button id="tab-range" onclick="setSplitMode('range')"
+      style="flex:1;padding:10px;border:none;cursor:pointer;font-size:.88rem;font-weight:600;
+             background:linear-gradient(135deg,#1e3a5f,#2d1f6e);color:var(--accent);transition:all .18s">
+      📏 Page Range
+    </button>
+    <button id="tab-custom" onclick="setSplitMode('custom')"
+      style="flex:1;padding:10px;border:none;cursor:pointer;font-size:.88rem;font-weight:600;
+             background:var(--card);color:var(--muted);border-left:1px solid var(--border);transition:all .18s">
+      🎯 Custom Pages
+    </button>
   </div>
+
+  <!-- Range mode -->
+  <div id="split-range-ui">
+    <div style="display:flex;gap:14px">
+      <div class="field" style="flex:1">
+        <label>Start Page</label>
+        <input type="number" id="split-start" value="1" min="1"/>
+      </div>
+      <div class="field" style="flex:1">
+        <label>End Page <span style="color:var(--muted);font-weight:400">(0 = all)</span></label>
+        <input type="number" id="split-end" value="0" min="0"/>
+      </div>
+    </div>
+    <p style="color:var(--muted);font-size:.82rem">Each page in the range becomes a separate PDF inside a ZIP file.</p>
+  </div>
+
+  <!-- Custom pages mode -->
+  <div id="split-custom-ui" style="display:none;flex-direction:column;gap:12px">
+    <div class="field">
+      <label>Pages to Extract</label>
+      <input type="text" id="split-pages" placeholder="e.g.  1, 5, 6, 8, 15, 28  or  1-5, 10, 20-25"/>
+    </div>
+    <div style="background:var(--card);border-radius:8px;padding:12px 16px;font-size:.82rem;color:var(--muted);line-height:1.8">
+      <strong style="color:var(--text)">How to enter pages:</strong><br>
+      • Individual pages → <code style="color:var(--accent)">1, 5, 8, 15</code><br>
+      • Page ranges &nbsp; → <code style="color:var(--accent)">3-7, 20-25</code><br>
+      • Mix freely &nbsp; &nbsp; → <code style="color:var(--accent)">1, 3-7, 12, 20-25, 28</code><br><br>
+      <strong style="color:var(--text)">You will get 2 PDFs inside a ZIP:</strong><br>
+      📄 <code style="color:var(--success)">selected_pages.pdf</code> — the pages you picked<br>
+      📄 <code style="color:var(--warn)">remaining_pages.pdf</code> — all other pages
+    </div>
+    <!-- Live preview chips -->
+    <div id="split-page-preview" style="display:none">
+      <div style="font-size:.8rem;color:var(--muted);margin-bottom:6px">
+        Preview — <span id="split-preview-count" style="color:var(--accent)"></span>:
+      </div>
+      <div id="split-chips" style="display:flex;flex-wrap:wrap;gap:6px"></div>
+    </div>
+  </div>
+
   <button class="btn btn-primary" onclick="doSplit()">✂️ Split &amp; Download ZIP</button>
   <div id="split-status"></div>
 </div>
@@ -684,11 +735,105 @@ function doMerge(){
   const fd=new FormData(); files.forEach(f=>fd.append('files',f));
   doAction('/merge',fd,'merge-status','merged.pdf');
 }
+// ── Split PDF helpers ─────────────────────────────────────────────────────
+let splitMode = 'range';
+
+function onSplitFileChange(){
+  const f = document.getElementById('split-file').files[0];
+  document.getElementById('split-file-name').textContent = f ? '📎 ' + f.name : '';
+}
+
+function setSplitMode(mode){
+  splitMode = mode;
+  const isCustom = mode === 'custom';
+
+  document.getElementById('split-range-ui').style.display  = isCustom ? 'none'  : 'block';
+  document.getElementById('split-custom-ui').style.display = isCustom ? 'flex'  : 'none';
+
+  // Tab styling
+  document.getElementById('tab-range').style.background  = isCustom
+    ? 'var(--card)' : 'linear-gradient(135deg,#1e3a5f,#2d1f6e)';
+  document.getElementById('tab-range').style.color = isCustom ? 'var(--muted)' : 'var(--accent)';
+  document.getElementById('tab-custom').style.background = isCustom
+    ? 'linear-gradient(135deg,#1e3a5f,#2d1f6e)' : 'var(--card)';
+  document.getElementById('tab-custom').style.color = isCustom ? 'var(--accent)' : 'var(--muted)';
+}
+
+// Live chip preview while user types custom pages
+document.addEventListener('DOMContentLoaded', ()=>{
+  const inp = document.getElementById('split-pages');
+  if(inp) inp.addEventListener('input', updateSplitPreview);
+});
+
+function updateSplitPreview(){
+  const raw   = document.getElementById('split-pages').value;
+  const pages = parsePageInput(raw, 9999);   // max 9999 for preview
+  const preview = document.getElementById('split-page-preview');
+  const chips   = document.getElementById('split-chips');
+  const count   = document.getElementById('split-preview-count');
+
+  if(pages.length === 0){ preview.style.display='none'; return; }
+  preview.style.display = 'block';
+  count.textContent = pages.length + ' page' + (pages.length!==1?'s':'') + ' selected';
+  // Show up to 30 chips then a "…and N more"
+  const shown = pages.slice(0, 30);
+  chips.innerHTML = shown.map(p=>`
+    <span style="background:var(--card);border:1px solid var(--accent);border-radius:4px;
+      padding:2px 8px;font-size:.78rem;color:var(--accent)">${p+1}</span>
+  `).join('');
+  if(pages.length > 30){
+    chips.innerHTML += `<span style="color:var(--muted);font-size:.78rem">…and ${pages.length-30} more</span>`;
+  }
+}
+
+// Mirror the backend parser in JS for live preview
+function parsePageInput(raw, total){
+  const pages = new Set();
+  raw.replace(/\s/g,'').split(',').forEach(part=>{
+    if(!part) return;
+    if(part.includes('-')){
+      const [a,b] = part.split('-',2).map(Number);
+      for(let i=Math.max(1,a); i<=Math.min(total,b); i++) pages.add(i-1);
+    } else {
+      const p = parseInt(part);
+      if(p>=1 && p<=total) pages.add(p-1);
+    }
+  });
+  return [...pages].sort((a,b)=>a-b);
+}
+
 function doSplit(){
   const fd=fd1('split-file'); if(!fd) return;
-  fd.append('start',document.getElementById('split-start').value);
-  fd.append('end',document.getElementById('split-end').value);
-  doAction('/split',fd,'split-status','split.zip');
+  fd.append('mode', splitMode);
+
+  if(splitMode === 'custom'){
+    const raw = document.getElementById('split-pages').value.trim();
+    if(!raw){ alert('Please enter the page numbers you want to extract.'); return; }
+    fd.append('pages', raw);
+    // Custom mode: show richer status after download
+    setStatus('split-status','info','<span class="spinner"></span> Building PDFs…');
+    fetch('/split',{method:'POST',body:fd})
+      .then(async res=>{
+        if(!res.ok){ const d=await res.json(); setStatus('split-status','err','❌ '+d.error); return; }
+        const sel = res.headers.get('X-Selected-Count')  || '?';
+        const rem = res.headers.get('X-Remaining-Count') || '?';
+        const tot = res.headers.get('X-Total-Pages')     || '?';
+        const blob = await res.blob();
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = 'split_custom.zip'; a.click();
+        setStatus('split-status','ok',
+          `✅ Done! ZIP contains:<br>
+           📄 <strong>selected_pages.pdf</strong> — ${sel} page(s)<br>
+           📄 <strong>remaining_pages.pdf</strong> — ${rem} page(s)<br>
+           <span style="color:var(--muted);font-size:.8rem">Total pages in PDF: ${tot}</span>`);
+      })
+      .catch(e=>setStatus('split-status','err','❌ '+e.message));
+  } else {
+    fd.append('start', document.getElementById('split-start').value);
+    fd.append('end',   document.getElementById('split-end').value);
+    doAction('/split', fd, 'split-status', 'split.zip');
+  }
 }
 function doRotate(){
   const fd=fd1('rotate-file'); if(!fd) return;

@@ -24,15 +24,12 @@ UPLOAD_FOLDER = Path("uploads");  UPLOAD_FOLDER.mkdir(exist_ok=True)
 OUTPUT_FOLDER = Path("outputs");  OUTPUT_FOLDER.mkdir(exist_ok=True)
 
 
-def _uid():
-    return uuid.uuid4().hex
+def _uid():          return uuid.uuid4().hex
 def _up(file):
     p = UPLOAD_FOLDER / f"{_uid()}_{file.filename}"
     file.save(p); return p
-def _out(name):
-    return OUTPUT_FOLDER / f"{_uid()}_{name}"
-def _ok_pdf(f):
-    return f and "." in f.filename and f.filename.rsplit(".",1)[1].lower() == "pdf"
+def _out(name):      return OUTPUT_FOLDER / f"{_uid()}_{name}"
+def _ok_pdf(f):      return f and "." in f.filename and f.filename.rsplit(".",1)[1].lower() == "pdf"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -286,25 +283,115 @@ def merge_pdfs():
     return send_file(out, as_attachment=True, download_name="merged.pdf")
 
 
+def _parse_page_input(raw: str, total: int) -> list[int]:
+    """
+    Parse a flexible page string into a sorted list of 0-indexed page numbers.
+
+    Accepts any mix of:
+      • individual pages   → "1, 5, 8"
+      • ranges             → "3-7"
+      • combined           → "1, 3-7, 12, 20-25"
+
+    Returns 0-indexed integers, clamped to [0, total-1], duplicates removed.
+    """
+    pages = set()
+    for part in raw.replace(" ", "").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            bounds = part.split("-", 1)
+            try:
+                lo = max(1, int(bounds[0]))
+                hi = min(total, int(bounds[1]))
+                for p in range(lo, hi + 1):
+                    pages.add(p - 1)        # convert to 0-indexed
+            except ValueError:
+                pass
+        else:
+            try:
+                p = int(part)
+                if 1 <= p <= total:
+                    pages.add(p - 1)
+            except ValueError:
+                pass
+    return sorted(pages)
+
+
 @app.route("/split", methods=["POST"])
 def split_pdf():
+    """
+    Two modes controlled by the 'mode' form field:
+
+    mode = "range"  (original behaviour)
+        start, end  → extract page range, one PDF per page in a ZIP.
+
+    mode = "custom" (new)
+        pages       → comma/range string e.g. "1,5,6,8,15,28"
+        Produces TWO PDFs inside a ZIP:
+          • selected_pages.pdf  — the pages you asked for, in order
+          • remaining_pages.pdf — every other page, in original order
+        If every page is selected, remaining_pages.pdf is omitted.
+        If no valid pages are found, returns an error.
+    """
     file = request.files.get("file")
     if not _ok_pdf(file):
         return jsonify({"error": "Upload a valid PDF."}), 400
-    start = max(1, int(request.form.get("start", 1)))
-    end   = int(request.form.get("end", 0))
 
-    path   = _up(file)
+    mode = request.form.get("mode", "range")
+    path = _up(file)
     reader = PdfReader(str(path))
     total  = len(reader.pages)
-    end    = total if end == 0 else min(end, total)
 
     zip_path = _out("split.zip")
-    with zipfile.ZipFile(zip_path, "w") as zf:
+
+    # ── MODE: custom pages ────────────────────────────────────────────────
+    if mode == "custom":
+        raw = request.form.get("pages", "").strip()
+        if not raw:
+            path.unlink()
+            return jsonify({"error": "Please enter page numbers to extract."}), 400
+
+        selected = _parse_page_input(raw, total)
+        if not selected:
+            path.unlink()
+            return jsonify({"error": f"No valid page numbers found. PDF has {total} pages."}), 400
+
+        selected_set = set(selected)
+        remaining    = [i for i in range(total) if i not in selected_set]
+
+        def _build_pdf(page_indices):
+            w = PdfWriter()
+            for i in page_indices:
+                w.add_page(reader.pages[i])
+            buf = io.BytesIO(); w.write(buf); buf.seek(0)
+            return buf.read()
+
+        with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr("selected_pages.pdf", _build_pdf(selected))
+            if remaining:
+                zf.writestr("remaining_pages.pdf", _build_pdf(remaining))
+
+        path.unlink()
+
+        # Return extra headers so the frontend can show a summary
+        resp = send_file(zip_path, as_attachment=True, download_name="split_custom.zip")
+        resp.headers["X-Selected-Count"]  = str(len(selected))
+        resp.headers["X-Remaining-Count"] = str(len(remaining))
+        resp.headers["X-Total-Pages"]     = str(total)
+        return resp
+
+    # ── MODE: page range (original) ────────────────────────────────────────
+    start = max(1, int(request.form.get("start", 1)))
+    end   = int(request.form.get("end", 0))
+    end   = total if end == 0 else min(end, total)
+
+    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         for i in range(start - 1, end):
             w = PdfWriter(); w.add_page(reader.pages[i])
             buf = io.BytesIO(); w.write(buf); buf.seek(0)
             zf.writestr(f"page_{i+1}.pdf", buf.read())
+
     path.unlink()
     return send_file(zip_path, as_attachment=True, download_name="split.zip")
 
@@ -438,5 +525,4 @@ def pdf_info():
 
 # ─────────────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(debug=True, use_reloader=False, port=5000)
